@@ -1,0 +1,20 @@
+# python
+__pycache__/
+*.pyc
+
+# never commit API keys or personal history —
+# these live in ~/.config/genie/ anyway, but just in case
+config.json
+history.jsonl
+
+# media / build artifacts (too large for git)
+*.wav
+*.mp4
+*.webm
+rec/
+events.json
+
+# editor junk
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#000; }
+  .card {
+    position:relative; width:1200px; height:630px; overflow:hidden;
+    background:
+      radial-gradient(900px 500px at 22% 28%, rgba(146,95,255,.28), transparent 60%),
+      radial-gradient(700px 500px at 88% 82%, rgba(64,196,255,.18), transparent 55%),
+      linear-gradient(155deg, #0a0a12 0%, #05050a 55%, #0b0710 100%);
+    font-family:"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  }
+  /* faint grid / stars */
+  .stars { position:absolute; inset:0; opacity:.5; }
+  .star { position:absolute; width:2px; height:2px; border-radius:50%;
+    background:#fff; box-shadow:0 0 6px 1px rgba(255,255,255,.5); }
+
+  .wrap { position:absolute; inset:0; display:flex; align-items:center; padding:0 90px; gap:70px; }
+
+  /* lamp */
+  .lampbox { flex:0 0 auto; position:relative; width:300px; height:300px;
+    display:flex; align-items:center; justify-content:center; }
+  .glow { position:absolute; width:340px; height:340px; border-radius:50%;
+    background:radial-gradient(circle, rgba(146,95,255,.55), rgba(64,196,255,.15) 45%, transparent 70%);
+    filter:blur(6px); }
+  svg { position:relative; z-index:2; }
+
+  /* text */
+  .txt { flex:1; }
+  .word { font-size:132px; font-weight:800; letter-spacing:-3px;
+    background:linear-gradient(180deg,#ffffff 0%,#cbb6ff 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 0 40px rgba(146,95,255,.35); line-height:.95; }
+  .tag { margin-top:14px; font-size:30px; color:#9aa3b8; font-weight:500; letter-spacing:.3px; }
+
+  .term { margin-top:34px; background:rgba(255,255,255,.04);
+    border:1px solid rgba(255,255,255,.08); border-radius:12px;
+    padding:16px 20px; font-family:"JetBrains Mono","Consolas",monospace;
+    font-size:22px; max-width:560px; }
+  .p { color:#7ee787; font-weight:600; }
+  .g { color:#e6ebf5; }
+  .cmd { color:#79c0ff; }
+  .dim { color:#6b7285; }
+
+  .foot { margin-top:26px; font-size:19px; color:#5a6072; letter-spacing:1px;
+    font-family:"JetBrains Mono","Consolas",monospace; }
+  .foot b { color:#8b93a7; font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="stars" id="stars"></div>
+    <div class="wrap">
+      <div class="lampbox">
+        <div class="glow"></div>
+        <svg width="260" height="260" viewBox="0 0 260 260" fill="none">
+          <defs>
+            <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#ffe38a"/>
+              <stop offset=".5" stop-color="#f4b53f"/>
+              <stop offset="1" stop-color="#c8871a"/>
+            </linearGradient>
+            <linearGradient id="smoke" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0" stop-color="#b088ff" stop-opacity="0"/>
+              <stop offset="1" stop-color="#c9b3ff" stop-opacity=".85"/>
+            </linearGradient>
+          </defs>
+          <!-- smoke wisp -->
+          <path d="M150 120 C 180 95, 130 78, 158 55 C 180 38, 150 24, 172 10"
+                stroke="url(#smoke)" stroke-width="9" stroke-linecap="round" fill="none"/>
+          <path d="M150 120 C 128 100, 168 88, 145 66"
+                stroke="url(#smoke)" stroke-width="6" stroke-linecap="round" fill="none" opacity=".6"/>
+          <!-- lamp body -->
+          <path d="M40 168
+                   C 40 150, 78 138, 128 138
+                   C 190 138, 232 150, 232 166
+                   C 232 186, 188 198, 128 198
+                   C 74 198, 40 186, 40 168 Z" fill="url(#gold)"/>
+          <!-- lamp base -->
+          <ellipse cx="128" cy="200" rx="52" ry="12" fill="#a9700f"/>
+          <!-- spout -->
+          <path d="M40 166 C 14 158, 6 150, 4 138 C 16 146, 30 150, 44 152 Z" fill="url(#gold)"/>
+          <!-- lid + knob -->
+          <path d="M104 138 C 104 126, 152 126, 152 138 Z" fill="url(#gold)"/>
+          <circle cx="128" cy="122" r="9" fill="url(#gold)"/>
+          <!-- handle -->
+          <path d="M198 150 C 226 146, 230 176, 206 186"
+                stroke="url(#gold)" stroke-width="10" fill="none" stroke-linecap="round"/>
+          <!-- shine -->
+          <ellipse cx="96" cy="158" rx="26" ry="7" fill="#fff6d6" opacity=".55"/>
+        </svg>
+      </div>
+
+      <div class="txt">
+        <div class="word">genie</div>
+        <div class="tag">your terminal, in plain English</div>
+        <div class="term">
+          <span class="p">$</span> <span class="g">/genie install teams for me</span><br>
+          <span class="dim">→</span> <span class="cmd">paru -S teams-for-linux</span>
+        </div>
+        <div class="foot">OPEN SOURCE &nbsp;·&nbsp; <b>CACHYOS / ARCH</b> &nbsp;·&nbsp; PYTHON</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const s = document.getElementById("stars");
+  for (let i=0;i<70;i++){
+    const d=document.createElement("div"); d.className="star";
+    d.style.left=Math.random()*1200+"px"; d.style.top=Math.random()*630+"px";
+    d.style.opacity=(Math.random()*.7+.2).toFixed(2);
+    const sc=(Math.random()*1.4+.4).toFixed(2); d.style.transform=`scale(${sc})`;
+    s.appendChild(d);
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1280px; height:720px; background:#04040a; overflow:hidden;
+    font-family:"JetBrains Mono","Cascadia Code","Fira Code",monospace; }
+
+  /* shared dark stage with a static starfield (no twinkle = no flashing) */
+  .bg { position:absolute; inset:0; z-index:0;
+    background:
+      radial-gradient(900px 560px at 26% 30%, rgba(146,95,255,.22), transparent 62%),
+      radial-gradient(760px 560px at 82% 78%, rgba(64,196,255,.14), transparent 58%),
+      linear-gradient(150deg,#0a0a13 0%,#050509 55%,#0b0711 100%); }
+  .stars { position:absolute; inset:0; z-index:1; }
+  .star { position:absolute; width:2px; height:2px; border-radius:50%; background:#fff; }
+
+  /* ---------- intro / outro cards ---------- */
+  .card { position:absolute; inset:0; z-index:10;
+    display:flex; align-items:center; justify-content:center; flex-direction:column;
+    opacity:0; transition:opacity .7s ease;
+    background:
+      radial-gradient(900px 560px at 26% 30%, rgba(146,95,255,.22), transparent 62%),
+      radial-gradient(760px 560px at 82% 78%, rgba(64,196,255,.14), transparent 58%),
+      linear-gradient(150deg,#0a0a13 0%,#050509 55%,#0b0711 100%); }
+  .cardstars { position:absolute; inset:0; z-index:-1; }
+  .card.show { opacity:1; }
+  .card.hide { opacity:0; }
+
+  /* the wordmark: flowing gradient + glow + wipe-in + settle */
+  .word {
+    font-weight:800; letter-spacing:-.02em; line-height:1;
+    background:linear-gradient(90deg,#b79bff,#8fb8ff,#7ee0c0,#b79bff);
+    background-size:300% 100%;
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 0 34px rgba(146,95,255,.45)); }
+  .intro .word { font-size:190px; }
+  .reveal { clip-path:inset(0 100% 0 0); }
+  .reveal.go { animation:wipe 1.05s cubic-bezier(.2,.7,.2,1) forwards, flow 7s linear infinite 1s; }
+  @keyframes wipe { from{clip-path:inset(0 100% 0 0); letter-spacing:.14em;}
+                    to  {clip-path:inset(0 0 0 0);     letter-spacing:-.02em;} }
+  @keyframes flow { to { background-position:300% 0; } }
+
+  .tag { margin-top:20px; font-size:36px; color:#aab2c6; font-weight:500;
+    letter-spacing:.02em; opacity:0; transform:translateY(14px); }
+  .tag.go { animation:rise .8s ease forwards; }
+  @keyframes rise { to { opacity:1; transform:translateY(0);} }
+
+  .underline { margin-top:30px; height:3px; width:0;
+    background:linear-gradient(90deg,transparent,#8fb8ff,#b79bff,transparent);
+    border-radius:3px; box-shadow:0 0 18px rgba(143,184,255,.6); }
+  .underline.go { animation:grow 1s ease .3s forwards; }
+  @keyframes grow { to { width:520px; } }
+
+  /* ---------- outro info block ---------- */
+  .outro .word { font-size:130px; }
+  .info { margin-top:34px; display:flex; flex-direction:column; align-items:center; gap:16px;
+    opacity:0; transform:translateY(20px); }
+  .info.go { animation:rise .7s ease .25s forwards; }
+  .link { font-size:40px; color:#e6ebf5; letter-spacing:.01em;
+    background:rgba(255,255,255,.05); border:1px solid rgba(146,95,255,.45);
+    border-radius:999px; padding:16px 34px; }
+  .link b { color:#c9b3ff; }
+  .meta { font-size:24px; color:#7a819a; letter-spacing:.14em; }
+  .by { font-size:24px; color:#9aa3b8; letter-spacing:.02em; }
+  .by b { color:#e6ebf5; }
+
+  /* ---------- terminal (unchanged look) ---------- */
+  .stage { position:absolute; inset:0; z-index:5; display:flex; align-items:center; justify-content:center; }
+  .window { width:1120px; height:604px; background:#12121b; border-radius:14px;
+    border:1px solid #2c2c44; box-shadow:0 40px 120px rgba(0,0,0,.6); overflow:hidden; }
+  .barx { background:#232333; padding:12px 16px; display:flex; align-items:center; gap:9px;
+    color:#6b7285; font-size:16px; }
+  .dot { width:13px; height:13px; border-radius:50%; }
+  .barx .t { margin-left:12px; }
+  .term { padding:22px 28px; font-size:20px; line-height:1.65; height:548px; overflow:hidden;
+    white-space:pre-wrap; word-break:break-word; color:#cdd3e0; }
+  .p{color:#7ee787;font-weight:600;} .g{color:#7ee787;}
+  .c{color:#79c0ff;} .d{color:#6b7285;} .y{color:#f0c674;}
+  .m{color:#d2a8ff;} .r{color:#ff7b72;font-weight:600;} .ok{color:#7ee787;}
+  .caret{display:inline-block;width:10px;height:20px;background:#cdd3e0;vertical-align:-3px;
+    animation:blink 1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+</style>
+</head>
+<body>
+  <div class="bg"></div>
+  <div class="stars" id="stars"></div>
+
+  <!-- terminal -->
+  <div class="stage">
+    <div class="window">
+      <div class="barx">
+        <div class="dot" style="background:#ff5f57"></div>
+        <div class="dot" style="background:#febc2e"></div>
+        <div class="dot" style="background:#28c840"></div>
+        <span class="t">aibel@cachyos — Konsole</span>
+      </div>
+      <div class="term" id="term"></div>
+    </div>
+  </div>
+
+  <!-- intro -->
+  <div class="card intro" id="intro">
+    <div class="cardstars"></div>
+    <div class="word reveal" id="introword">genie</div>
+    <div class="underline" id="introline"></div>
+    <div class="tag" id="introtag">your terminal, in plain English</div>
+  </div>
+
+  <!-- outro -->
+  <div class="card outro" id="outro">
+    <div class="cardstars"></div>
+    <div class="word reveal" id="outroword">genie</div>
+    <div class="info" id="outroinfo">
+      <div class="link">★ <b>github.com/wizard142/genie</b></div>
+      <div class="meta">OPEN SOURCE · CACHYOS / ARCH · PYTHON</div>
+      <div class="by">built by <b>wizard142</b></div>
+    </div>
+  </div>
+
+<script>
+const term = document.getElementById("term");
+const caret = document.createElement("span");
+caret.className = "caret";
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---- sound-event timeline capture (times are ms from run() start) ----
+let T0 = 0;
+window.__ev = [];
+function ev(type){ window.__ev.push([Math.round(performance.now() - T0), type]); }
+
+// static starfields (drawn once) — main bg + each card
+function fillStars(el, n){
+  for(let i=0;i<n;i++){
+    const d=document.createElement("div"); d.className="star";
+    d.style.left=((i*97)%1280)+Math.round((i*53)%9)+"px";
+    d.style.top=((i*141)%720)+Math.round((i*29)%7)+"px";
+    d.style.opacity=(0.15+((i*37)%60)/100).toFixed(2);
+    d.style.transform="scale("+(0.4+((i*13)%14)/10).toFixed(2)+")";
+    el.appendChild(d);
+  }
+}
+fillStars(document.getElementById("stars"), 80);
+document.querySelectorAll(".cardstars").forEach(el=>fillStars(el, 70));
+
+function put(cls, ch){
+  if(cls){ const s=document.createElement("span"); s.className=cls; s.textContent=ch; term.appendChild(s); }
+  else term.appendChild(document.createTextNode(ch));
+  term.scrollTop = term.scrollHeight;
+}
+async function play(steps){
+  for(const [cls,text,delay,pause] of steps){
+    caret.remove();
+    if(delay>0){ for(const ch of text){ put(cls,ch); if(ch!==" ") ev("key"); term.appendChild(caret); await sleep(delay);} }
+    else put(cls,text);
+    term.appendChild(caret);
+    if(pause) await sleep(pause);
+  }
+}
+const line = "────────────────────────────────────────────";
+async function prompt(){ put("p","aibel@cachyos"); put("d"," ~ "); put("","$ "); term.appendChild(caret); await sleep(500); }
+async function scene(cmd, blocks, endSound, typePause=700){
+  await prompt();
+  await play([["", cmd, 45, typePause]]);
+  put("","\n");
+  await play(blocks);
+  if(endSound) ev(endSound);
+  await sleep(1400);
+  put("","\n");
+}
+
+async function run(){
+  T0 = performance.now();
+  const intro=document.getElementById("intro"), outro=document.getElementById("outro");
+
+  // ---- INTRO (typographic, animated) ----
+  ev("whoosh");
+  intro.classList.add("show");
+  await sleep(150);
+  ev("boom");
+  document.getElementById("introword").classList.add("go");
+  document.getElementById("introline").classList.add("go");
+  await sleep(700);
+  document.getElementById("introtag").classList.add("go");
+  await sleep(3000);
+  intro.classList.add("hide");
+  await sleep(750);
+  intro.style.display="none";
+
+  // ---- TERMINAL (unchanged) ----
+  await scene("/genie how much disk space do i have", [
+    ["d","\n  you said   "],["","how much disk space do i have\n"],
+    ["","  command    "],["c","df -h\n"],
+    ["","  meaning    "],["","shows how full each disk is, in plain sizes\n"],
+    ["d","\n  run it? [Enter = yes · n = no · c = copy] "],["ok","✓\n"],
+    ["d","  "+line+"\n"],
+    ["","  Filesystem   Size  Used  Avail  Use%\n  /dev/nvme0n1 476G  210G   242G   47%\n"],
+    ["d","  "+line+"\n"],
+    ["ok","  ✓ done  "],["d","— now you know: df -h\n"],
+  ], "ding");
+  await scene("/genie install brave", [
+    ["d","\n  you said   "],["","install brave\n"],
+    ["","  command    "],["c","paru -S brave-bin\n"],
+    ["","  meaning    "],["","installs the Brave browser from the AUR\n"],
+    ["y","  note       this will change your system\n"],
+    ["d","\n  run it? [Enter = yes · n = no · c = copy] "],["ok","✓\n"],
+    ["d","  "+line+"\n"],
+    ["d","  resolving dependencies... installing brave-bin...\n"],
+    ["d","  "+line+"\n"],
+    ["ok","  ✓ done\n"],
+  ], "ding");
+  await scene("/genie install macafee", [
+    ["m","\n  🧞 genie asks:  "],
+    ["","McAfee isn't supported on Arch. Want an\n  open-source antivirus like ClamAV instead?\n"],
+    ["d","  › "],["","yes install clamav\n"],
+    ["","\n  command    "],["c","paru -S clamav\n"],
+    ["","  meaning    "],["","installs ClamAV, a free open-source antivirus\n"],
+    ["y","  note       this will change your system\n"],
+  ], "chime", 800);
+  await scene("/genie delete everything on my pc", [
+    ["d","\n  you said   "],["","delete everything on my pc\n"],
+    ["","  command    "],["c","rm -rf /\n"],
+    ["r","\n  ✗ blocked. "],["","that could destroy your system,\n  and no wish is worth that.\n"],
+  ], "buzz", 800);
+  await sleep(400);
+
+  // ---- OUTRO (text only, one clean reveal, holds steady) ----
+  ev("whoosh");
+  outro.classList.add("show");
+  await sleep(150);
+  ev("boom");
+  document.getElementById("outroword").classList.add("go");
+  document.getElementById("outroinfo").classList.add("go");
+  await sleep(3600);
+
+  window.__done = true;
+}
+run();
+</script>
+</body>
+</html>

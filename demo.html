@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>genie — demo</title>
+<style>
+  :root {
+    --bg: #16161e; --win: #1b1b26; --bar: #2a2a3a;
+    --text: #cdd3e0; --dim: #6b7285; --green: #7ee787;
+    --cyan: #79c0ff; --magenta: #d2a8ff; --yellow: #f0c674; --red: #ff7b72;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(ellipse at 30% 20%, #232338 0%, var(--bg) 60%);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+  .window {
+    width: min(860px, 94vw); background: var(--win);
+    border-radius: 12px; border: 1px solid #30304a;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55);
+    overflow: hidden;
+  }
+  .titlebar {
+    background: var(--bar); padding: 10px 14px;
+    display: flex; align-items: center; gap: 8px;
+    color: var(--dim); font-size: 13px;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .titlebar span.title { margin-left: 10px; }
+  .term {
+    padding: 22px 26px 30px; font-size: 15px; line-height: 1.75;
+    height: 500px; overflow: hidden; white-space: pre-wrap; word-break: break-word;
+  }
+  .p  { color: var(--green); font-weight: 600; }
+  .g  { color: var(--magenta); }
+  .c  { color: var(--cyan); }
+  .d  { color: var(--dim); }
+  .y  { color: var(--yellow); }
+  .ok { color: var(--green); }
+  .caret {
+    display: inline-block; width: 9px; height: 18px;
+    background: var(--text); vertical-align: -3px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+  <div class="window">
+    <div class="titlebar">
+      <div class="dot" style="background:#ff5f57"></div>
+      <div class="dot" style="background:#febc2e"></div>
+      <div class="dot" style="background:#28c840"></div>
+      <span class="title">aibel@cachyos — Konsole</span>
+    </div>
+    <div class="term" id="term"></div>
+  </div>
+
+<script>
+const term = document.getElementById("term");
+
+/* each step: [cssClass, text, charDelay(ms), pauseAfter(ms)]
+   charDelay 0 = instant print */
+const script = [
+  ["p", "aibel@cachyos", 0, 0], ["d", " ~ ", 0, 0], ["", "$ ", 0, 600],
+  ["", "/genie install teams for me", 55, 900], ["", "\n", 0, 0],
+
+  ["d", "\n  you said   ", 0, 0], ["", "install teams for me\n", 0, 120],
+  ["", "  command    ", 0, 0], ["c", "paru -S teams-for-linux\n", 14, 120],
+  ["", "  meaning    ", 0, 0], ["", "installs Microsoft Teams using paru (the package manager)\n", 8, 100],
+  ["y", "  note       this will change your system\n", 0, 400],
+  ["d", "\n  run it? [Enter = yes · n = no · c = copy] ", 0, 1300],
+  ["ok", "✓\n", 0, 300],
+  ["d", "  ────────────────────────────────────────\n", 0, 150],
+  ["d", "  resolving dependencies...\n  downloading teams-for-linux 2.5.2...\n  installing...\n", 6, 300],
+  ["d", "  ────────────────────────────────────────\n", 0, 100],
+  ["ok", "  ✓ done  ", 0, 0], ["d", "— now you know: paru -S teams-for-linux\n\n", 10, 1600],
+
+  ["p", "aibel@cachyos", 0, 0], ["d", " ~ ", 0, 0], ["", "$ ", 0, 500],
+  ["", "/genie how much disk space do i have", 50, 800], ["", "\n", 0, 0],
+  ["d", "\n  you said   ", 0, 0], ["", "how much disk space do i have\n", 0, 100],
+  ["", "  command    ", 0, 0], ["c", "df -h\n", 20, 100],
+  ["", "  meaning    ", 0, 0], ["", "shows how full each disk is, in human-readable sizes\n", 8, 300],
+  ["d", "\n  run it? [Enter = yes · n = no · c = copy] ", 0, 1100],
+  ["ok", "✓\n", 0, 200],
+  ["d", "  ────────────────────────────────────────\n", 0, 100],
+  ["", "  Filesystem   Size  Used  Avail  Use%  Mounted on\n  /dev/nvme0n1 476G  210G   242G   47%   /\n", 4, 250],
+  ["d", "  ────────────────────────────────────────\n", 0, 80],
+  ["ok", "  ✓ done  ", 0, 0], ["d", "— now you know: df -h\n\n", 10, 1600],
+
+  ["p", "aibel@cachyos", 0, 0], ["d", " ~ ", 0, 0], ["", "$ ", 0, 500],
+  ["", "/genie delete my whole system", 55, 900], ["", "\n", 0, 0],
+  ["d", "\n  you said   ", 0, 0], ["", "delete my whole system\n", 0, 120],
+  ["", "  command    ", 0, 0], ["c", "rm -rf /\n", 20, 400],
+  ["", "\n  ", 0, 0],
+  ["", "✗ blocked.", 0, 0, "red"], // handled below
+];
+
+const blockedLine = [
+  ["red", "  ✗ blocked. ", 0, 0],
+  ["", "that command could destroy your system,\n  and no wish is worth that.\n\n", 12, 2400],
+];
+
+function put(cls, ch) {
+  if (cls === "red") {
+    const s = document.createElement("span");
+    s.style.color = "var(--red)"; s.style.fontWeight = "600";
+    s.textContent = ch; term.appendChild(s);
+  } else if (cls) {
+    const s = document.createElement("span");
+    s.className = cls; s.textContent = ch; term.appendChild(s);
+  } else {
+    term.appendChild(document.createTextNode(ch));
+  }
+  term.scrollTop = term.scrollHeight;
+}
+
+const caret = document.createElement("span");
+caret.className = "caret";
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function play(steps) {
+  for (const [cls, text, delay, pause] of steps) {
+    caret.remove();
+    if (delay > 0) {
+      for (const ch of text) {
+        put(cls, ch);
+        term.appendChild(caret);
+        await sleep(delay + Math.random() * 30);
+      }
+    } else {
+      put(cls, text);
+    }
+    term.appendChild(caret);
+    if (pause) await sleep(pause);
+  }
+}
+
+async function run() {
+  term.innerHTML = "";
+  await play(script.slice(0, -1));           // everything except the marker
+  await play(blockedLine);                    // the blocked finale
+  put("p", "aibel@cachyos"); put("d", " ~ "); put("", "$ ");
+  term.appendChild(caret);
+  await sleep(3500);
+  run();                                      // loop forever for easy recording
+}
+run();
+</script>
+</body>
+</html>
