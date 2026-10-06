@@ -3,6 +3,7 @@
 chill ambient pad + synced typing clicks, whooshes, dings and a blocked buzz.
 All synthesized with numpy — nothing sampled, nothing licensed."""
 import json, sys
+from pathlib import Path
 import numpy as np
 
 SR = 44100
@@ -104,7 +105,8 @@ def sfx_buzz():
     amp = env_exp(n, 0.18) * (0.7 + 0.3*np.sign(np.sin(2*np.pi*22*t)))  # slight rasp
     return tone * amp * 0.16
 
-events = json.load(open('/home/claude/genie/events.json'))
+output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).parent / 'rec'
+events = json.loads((output_dir / 'events.json').read_text())
 key_i = 0
 for t_ms, kind in events:
     at = t_ms/1000.0 + OFFSET
@@ -124,7 +126,7 @@ buf = np.tanh(buf*1.05)*0.97          # gentle soft-clip for glue
 pcm = (buf * 32767).astype(np.int16)
 
 import wave
-w = wave.open('/home/claude/genie/audio.wav', 'wb')
+w = wave.open(str(output_dir / 'audio.wav'), 'wb')
 w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
 w.writeframes(pcm.tobytes()); w.close()
 print("wrote audio.wav  keys=%d  peak=%.3f  dur=%.2fs" % (key_i, peak, N/SR))

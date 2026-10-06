@@ -312,5 +312,194 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(genie.parse_reply(raw)["cmd"], "ls")
 
 
+class TestExpandedOffline(unittest.TestCase):
+    def setUp(self):
+        self._which, self._win = genie.shutil.which, genie.IS_WIN
+        genie.IS_WIN = False
+
+    def tearDown(self):
+        genie.shutil.which, genie.IS_WIN = self._which, self._win
+
+    def test_package_diagnostics_across_linux_managers(self):
+        managers = {
+            'pacman': ('pacman -Q', 'pacman -Qu'),
+            'paru': ('paru -Q', 'paru -Qu'), 'yay': ('yay -Q', 'yay -Qu'),
+            'apt': ('apt list --installed', 'apt list --upgradable'),
+            'dnf': ('dnf list --installed', 'dnf list --upgrades'),
+            'dnf5': ('dnf5 list --installed', 'dnf5 list --upgrades'),
+            'zypper': ('zypper search --installed-only', 'zypper list-updates'),
+            'apk': ('apk info', "apk version -l '<'"),
+            'xbps-install': ('xbps-query -l', 'xbps-install -un'),
+            'emerge': ('qlist -I', 'emerge --pretend --update --deep --newuse @world'),
+        }
+        for manager, expected in managers.items():
+            genie.shutil.which = FakeWhich(manager, 'qlist')
+            for wish, cmd in zip(('list installed packages', 'check for updates'), expected):
+                with self.subTest(manager=manager, wish=wish):
+                    hit = genie.offline_match(wish, False)
+                    self.assertEqual(hit[0], cmd)
+                    self.assertEqual(hit[2], 0)
+
+    def test_shared_wishes_across_linux_families(self):
+        expected = {'uptime': 'uptime', 'show cpu info': 'cat /proc/cpuinfo',
+                    'show routes': 'ip route show', 'listening ports': 'ss -lnt',
+                    'who am i': 'whoami', 'git status': 'git status --short --branch',
+                    'create folder Project Notes': "mkdir -p 'Project Notes'",
+                    'read file README.md': 'cat README.md'}
+        for manager in ('pacman', 'apt', 'dnf5', 'zypper', 'apk', 'xbps-install', 'emerge'):
+            genie.shutil.which = FakeWhich(manager, 'uptime', 'cat', 'ip', 'ss', 'whoami', 'git')
+            for wish, cmd in expected.items():
+                with self.subTest(manager=manager, wish=wish):
+                    self.assertEqual(genie.offline_match(wish, False)[0], cmd)
+
+    def test_windows_commands(self):
+        with WinMode():
+            expected = {'list installed apps': 'winget list',
+                        'check for updates': 'winget list --upgrade-available',
+                        'show routes': 'Get-NetRoute', 'show hidden files': 'Get-ChildItem -Force',
+                        'create folder Project Notes': "New-Item -ItemType Directory -Path 'Project Notes'",
+                        'read file ReadMe.txt': "Get-Content -LiteralPath 'ReadMe.txt'",
+                        'sha256 file ReadMe.txt': "Get-FileHash -Algorithm SHA256 -LiteralPath 'ReadMe.txt'",
+                        'status of service Spooler': "Get-Service -Name 'Spooler'",
+                        'restart service Spooler': "Restart-Service -Name 'Spooler'",
+                        'wsl distros': 'wsl --list --verbose'}
+            for wish, cmd in expected.items():
+                with self.subTest(wish=wish):
+                    self.assertEqual(genie.offline_match(wish, False)[0], cmd)
+
+    def test_windows_fallback_managers(self):
+        genie.IS_WIN = True
+        for manager in ('choco', 'scoop'):
+            genie.shutil.which = FakeWhich(manager)
+            with self.subTest(manager=manager):
+                self.assertEqual(genie.offline_match('install vlc', False)[0], f'{manager} install vlc')
+                self.assertNotIn('Microsoft.', genie.offline_match('install teams', False)[0])
+                self.assertIn('search', genie.offline_match('install teams', False)[0])
+
+    def test_service_managers(self):
+        for tool, expected in (
+                ('systemctl', "sudo systemctl restart sshd"),
+                ('rc-service', 'sudo rc-service sshd restart'),
+                ('sv', 'sudo sv restart /var/service/sshd')):
+            genie.shutil.which = FakeWhich(tool)
+            with self.subTest(tool=tool):
+                hit = genie.offline_match('restart service sshd', False)
+                self.assertEqual(hit[0], expected)
+                self.assertEqual(hit[2], 1)
+
+    def test_minimal_machine_reports_missing_tools(self):
+        genie.shutil.which = FakeWhich('apk', 'ps')
+        for wish in ('listening ports', 'git status', 'docker containers', 'wifi status'):
+            with self.subTest(wish=wish):
+                self.assertIn('not installed', genie.offline_match(wish, False)[0])
+        self.assertEqual(genie.offline_match('cpu usage', False)[0], 'ps')
+        self.assertIn('No supported', genie.offline_match('restart service sshd', False)[0])
+
+    def test_windows_missing_optional_tools(self):
+        with WinMode():
+            self.assertIn('not installed', genie.offline_match('docker containers', False)[0])
+            self.assertIsNone(genie.offline_match('flatpak apps', False))
+
+    def test_paths_keep_case_and_are_literal(self):
+        genie.shutil.which = FakeWhich('gio')
+        self.assertEqual(genie.offline_match('trash file MyNotes.TXT', False)[0], 'gio trash -- MyNotes.TXT')
+        self.assertEqual(genie.offline_match('read file -n', False)[0], 'cat ./-n')
+        self.assertEqual(genie.offline_match('find files -Notes*', False)[0], "find . -type f -name '-Notes*'")
+        self.assertEqual(genie.offline_match('find files *?', False)[0], "find . -type f -name '*?'")
+        self.assertIn("'Mixed Case'", genie.offline_match('create folder Mixed Case', False)[0])
+        with WinMode():
+            cmd = genie.offline_match("read file O'Brien.txt", False)[0]
+            self.assertEqual(cmd, "Get-Content -LiteralPath 'O''Brien.txt'")
+
+    def test_shell_arguments_cannot_inject_commands(self):
+        import tempfile
+        import pathlib
+        import subprocess
+        with tempfile.TemporaryDirectory() as root:
+            # Real shell execution: malicious-looking filename must be printed
+            # literally; neither the substitution nor the semicolon may execute.
+            marker = pathlib.Path(root) / 'PWNED'
+            filename = "ReadMe'; touch PWNED; echo '$(touch PWNED)"
+            pathlib.Path(root, filename).write_text('literal content')
+            cmd = genie.offline_match('read file ' + filename, False)[0]
+            result = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'literal content')
+            self.assertFalse(marker.exists())
+
+    def test_search_terms_are_shell_data(self):
+        import shlex
+        genie.shutil.which = FakeWhich('apt')
+        cmd = genie.offline_match("search for package x'; touch PWNED; echo '", False)[0]
+        self.assertEqual(shlex.split(cmd), ['apt', 'search', "x'; touch pwned; echo '"])
+        with WinMode():
+            cmd = genie.offline_match('search for package $(Start-Process calc)', False)[0]
+            self.assertIn("'$(start-process calc)'", cmd)
+
+    def test_parameterized_read_only_commands_execute(self):
+        import tempfile
+        import pathlib
+        import subprocess
+        import hashlib
+        # Use real executables for this integration check.
+        genie.shutil.which = self._which
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root) / 'Case Sensitive.txt'
+            path.write_text('genie\n')
+            wishes = ['read file ' + str(path), 'sha256 file ' + str(path),
+                      'file info ' + str(path), 'find files *.txt', 'size of ' + str(path)]
+            for wish in wishes:
+                cmd = genie.offline_match(wish, False)[0]
+                result = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, (wish, result.stderr))
+                if wish.startswith('sha256'):
+                    self.assertIn(hashlib.sha256(b'genie\n').hexdigest(), result.stdout)
+                elif wish.startswith('read'):
+                    self.assertEqual(result.stdout, 'genie\n')
+                elif wish.startswith('find'):
+                    self.assertIn('Case Sensitive.txt', result.stdout)
+
+    def test_dnf5_and_tumbleweed(self):
+        from unittest.mock import patch
+        genie.shutil.which = FakeWhich('dnf', 'dnf5')
+        self.assertEqual(genie.detect_pkg()['name'], 'dnf5')
+        self.assertEqual(genie.offline_match('update my system', False)[0], 'sudo dnf5 upgrade --refresh')
+        genie.shutil.which = FakeWhich('zypper')
+        with patch.object(genie, 'distro_name', return_value='openSUSE Tumbleweed'):
+            self.assertEqual(genie.offline_match('update my system', False)[0], 'sudo zypper dup')
+        with patch.object(genie, 'distro_name', return_value='openSUSE Leap'):
+            self.assertEqual(genie.offline_match('update my system', False)[0], 'sudo zypper update')
+
+    def test_new_actions_keep_confirmation_levels(self):
+        genie.shutil.which = FakeWhich('systemctl')
+        for wish in ('create folder Notes', 'start service sshd', 'enable service sshd', 'disable service sshd'):
+            with self.subTest(wish=wish):
+                hit = genie.offline_match(wish, False)
+                self.assertGreaterEqual(genie.danger_of(hit[0], hit[2]), 1)
+        self.assertEqual(genie.danger_of('dnf5 install vlc'), 1)
+
+    def test_public_ip_is_not_confused_with_local_ip(self):
+        genie.shutil.which = FakeWhich('curl')
+        self.assertIn('https://api.ipify.org', genie.offline_match('public ip', False)[0])
+        with WinMode():
+            self.assertIn('https://api.ipify.org', genie.offline_match('my public ip', False)[0])
+
+    def test_pacman_does_not_install_aur_only_aliases(self):
+        genie.shutil.which = FakeWhich('pacman')
+        self.assertIsNone(genie.offline_match('install brave', True))
+        self.assertIn('search', genie.offline_match('install brave', False)[1])
+
+    def test_read_only_service_queries_do_not_warn_about_changes(self):
+        genie.shutil.which = FakeWhich('systemctl')
+        hit = genie.offline_match('status of service sshd', False)
+        self.assertEqual(genie.danger_of(hit[0], hit[2]), 0)
+        with WinMode():
+            self.assertEqual(genie.danger_of("Restart-Service -Name 'Spooler'"), 1)
+
+    def test_unsupported_compound_requests_are_not_partially_executed(self):
+        for wish in ('restart service sshd; reboot', 'ping example.com; reboot', 'uptime and reboot'):
+            self.assertIsNone(genie.offline_match(wish, True), wish)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

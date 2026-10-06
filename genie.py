@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -168,7 +169,11 @@ def detect_pkg():
         ("apt", {"family": "debian", "name": "apt", "aur": False,
                  "install": "sudo apt install {pkg}", "remove": "sudo apt remove {pkg}",
                  "update": "sudo apt update && sudo apt upgrade",
-                 "search": "apt search '{term}'", "clean": "sudo apt autoremove"}),
+                 "search": "apt search '{term}'", "clean": "sudo apt clean"}),
+        ("dnf5", {"family": "fedora", "name": "dnf5", "aur": False,
+                  "install": "sudo dnf5 install {pkg}", "remove": "sudo dnf5 remove {pkg}",
+                  "update": "sudo dnf5 upgrade --refresh", "search": "dnf5 search {term}",
+                  "clean": "sudo dnf5 clean packages"}),
         ("dnf", {"family": "fedora", "name": "dnf", "aur": False,
                  "install": "sudo dnf install {pkg}", "remove": "sudo dnf remove {pkg}",
                  "update": "sudo dnf upgrade --refresh",
@@ -195,6 +200,8 @@ def detect_pkg():
     ]
     for exe, spec in table:
         if shutil.which(exe):
+            if exe == "zypper" and "tumbleweed" in distro_name().lower():
+                spec = dict(spec, update="sudo zypper dup")
             return spec
     return {"family": "unknown", "name": None, "aur": False}
 
@@ -568,10 +575,260 @@ def _app_name(raw):
     return a.strip()
 
 
+# The parser treats user arguments as data, never as shell syntax. New rules
+# match complete requests, so unrelated/compound wishes still go to the AI.
+def _clean_preserving_case(text):
+    t = text.strip()
+    t = re.sub(r"^(please |pls |can you |could you |hey |yo )+", "", t, flags=re.I)
+    return re.sub(r"( for me| please| pls| right now| now)+$", "", t, flags=re.I)
+
+
+def _quote(value):
+    return "'" + value.replace("'", "''") + "'" if IS_WIN else shlex.quote(value)
+
+
+def _unquote(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _path(value):
+    value = _unquote(value)
+    if not IS_WIN:
+        value = os.path.expanduser(value)
+        if value.startswith('-'):
+            value = './' + value
+    return value
+
+
+def _quote_path(value):
+    return _quote(_path(value))
+
+
+def _tool_command(tool, cmd):
+    if shutil.which(tool):
+        return cmd
+    # Keep a recognized wish offline on minimal installations. Never silently
+    # install prerequisites or emit a command that will fail mysteriously.
+    return 'echo ' + _quote(f"{tool} is not installed; install it to use this wish.")
+
+
+def _manager_alias(app, pkg):
+    if IS_WIN and pkg['name'] != 'winget':
+        # WinGet publisher IDs are not Chocolatey/Scoop package names.
+        names = {'git': 'git', 'vlc': 'vlc', 'firefox': 'firefox',
+                 '7zip': '7zip', 'python': 'python', 'node': 'nodejs',
+                 'nodejs': 'nodejs'}
+        return names.get(app)
+    value = alias_pkg(app, pkg['family'])
+    if pkg['family'] == 'arch' and not pkg['aur'] and value in ('google-chrome', 'teams-for-linux', 'visual-studio-code-bin', 'spotify', 'brave-bin', 'zapzap', 'zoom'):
+        return None  # These aliases require an AUR helper.
+    return value
+
+
+def _package_search(pkg, term):
+    # Existing templates contain quotes: replace the complete quoted slot.
+    if re.fullmatch(r'[a-zA-Z0-9_. -]+', term):
+        return pkg['search'].format(term=term)
+    template = pkg['search'].replace("'{term}'", '{term}').replace('"{term}"', '{term}')
+    return template.format(term=_quote(term))
+
+
+# phrase alternatives, Linux command, PowerShell command, explanation, Linux
+# prerequisite. These requests are read-only; availability varies by machine.
+OFFLINE_INFO = [
+    ('uptime|how long has (?:my |the )?(?:pc|computer|system) been running', 'uptime',
+     "(Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime", 'shows time since the last boot', 'uptime'),
+    ('hostname|(?:show |what is )?(?:my |the )?computer name', 'hostname', '$env:COMPUTERNAME', 'shows this computer’s name', 'hostname'),
+    ('(?:show |what is )?(?:my |the )?kernel version', 'uname -r', '[System.Environment]::OSVersion.Version', 'shows the OS kernel version', 'uname'),
+    ('(?:show |what is )?(?:my |the )?(?:os|operating system) version', 'cat /etc/os-release',
+     'Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber', 'shows the installed operating system', 'cat'),
+    ('(?:show |list )?(?:my )?cpu(?: info| information| model)?', 'cat /proc/cpuinfo',
+     'Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors', 'shows processor details', 'cat'),
+    ('(?:show |list )?(?:my )?(?:disks|drives|partitions)', 'lsblk',
+     'Get-Disk | Select-Object Number, FriendlyName, Size, OperationalStatus', 'lists physical disks and partitions', 'lsblk'),
+    ('(?:show |list )?(?:my )?usb devices', 'lsusb', 'Get-PnpDevice -PresentOnly | Where-Object InstanceId -Like \'USB*\'', 'lists USB devices', 'lsusb'),
+    ('(?:show |list )?(?:my )?(?:gpu|graphics card)(?: info)?', 'lspci',
+     'Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion', 'shows graphics hardware (Linux lists all PCI devices)', 'lspci'),
+    ('(?:show |list )?(?:my )?environment variables', 'printenv', 'Get-ChildItem Env:', 'shows environment variables; output may contain secrets', 'printenv'),
+    ('who am i|current user|(?:show )?my username', 'whoami', 'whoami', 'shows your current username', 'whoami'),
+    ('(?:show |list )?(?:my )?groups', 'id', 'whoami /groups', 'shows your user and group membership', 'id'),
+    ('(?:show |list )?(?:logged in users|logins)', 'who', 'quser', 'shows logged-in user sessions', 'who'),
+    ('(?:show |list )?(?:network adapters|network interfaces)', 'ip link show', 'Get-NetAdapter', 'lists network adapters', 'ip'),
+    ('(?:show |list )?(?:routes|routing table)', 'ip route show', 'Get-NetRoute', 'shows network routes', 'ip'),
+    ('(?:show |list )?(?:dns servers|dns settings)', 'cat /etc/resolv.conf', 'Get-DnsClientServerAddress', 'shows DNS resolver configuration', 'cat'),
+    ('(?:show |list )?(?:listening ports|open ports)', 'ss -lnt',
+     'Get-NetTCPConnection -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess', 'shows listening TCP ports', 'ss'),
+    ('(?:show |list )?(?:network connections|tcp connections)', 'ss -nt', 'Get-NetTCPConnection', 'shows TCP connections', 'ss'),
+    ('(?:show |list )?(?:arp table|neighbors|neighbours)', 'ip neigh show', 'Get-NetNeighbor', 'shows neighboring network devices', 'ip'),
+    ('(?:show |list )?(?:hidden files)', 'ls -la', 'Get-ChildItem -Force', 'lists files including hidden entries', 'ls'),
+    ('(?:show |list )?(?:services|running services)', None, 'Get-Service', 'lists services', None),
+    ('(?:show |list )?(?:failed services)', None, "Get-Service | Where-Object Status -EQ 'Stopped'", 'lists failed units on Linux or stopped services on Windows', None),
+    ('(?:show |list )?(?:boot logs)', None, None, 'shows logs from the current boot', None),
+    ('(?:show |list )?(?:system errors|recent errors)', None,
+     "Get-WinEvent -FilterHashtable @{LogName='System'; Level=2} -MaxEvents 20", 'shows recent system errors', None),
+    ('(?:show |list )?(?:scheduled tasks|cron jobs)', 'crontab -l', 'Get-ScheduledTask', 'lists your scheduled jobs', 'crontab'),
+    ('(?:show |list )?(?:firewall status|firewall rules)', None, 'Get-NetFirewallProfile', 'shows firewall configuration', None),
+    ('(?:show |list )?(?:wifi status|wi-fi status)', 'nmcli device status', 'netsh wlan show interfaces', 'shows network connection status', 'nmcli'),
+    ('(?:show |list )?(?:wifi profiles|saved wifi networks)', 'nmcli connection show', 'netsh wlan show profiles', 'lists saved network profiles without passwords', 'nmcli'),
+    ('(?:show |list )?(?:command history)', 'echo "Shell history belongs to your interactive shell; run history there."', 'Get-History', 'shows history available to the current shell', 'echo'),
+    ('(?:show |list )?(?:time zone|timezone)', 'date +%Z', 'Get-TimeZone', 'shows the current time zone', 'date'),
+    ('(?:show |list )?(?:cpu usage|top cpu processes)', 'ps -eo pid,comm,pcpu --sort=-pcpu | head -n 16',
+     'Get-Process | Sort-Object CPU -Descending | Select-Object -First 15 Name, Id, CPU', 'shows processes ranked by CPU time (Windows uses cumulative time)', 'ps'),
+    ('(?:show |list )?(?:swap usage|swap space)', 'cat /proc/swaps',
+     'Get-CimInstance Win32_PageFileUsage', 'shows configured swap/page files', 'cat'),
+    ('(?:show |list )?(?:mounted filesystems|mounts)', 'mount', 'Get-PSDrive -PSProvider FileSystem', 'lists mounted filesystems', 'mount'),
+    ('(?:show |list )?(?:disk usage by folder|folder sizes)', 'du -h -d 1 .',
+     'Get-ChildItem -Directory | ForEach-Object { $s = Get-ChildItem -LiteralPath $_.FullName -Recurse -File | Measure-Object Length -Sum; [pscustomobject]@{Folder=$_.Name; Bytes=$s.Sum} }', 'shows space used by folders in the current directory', 'du'),
+    ('(?:show |list )?(?:largest files)', 'find . -type f -exec du -k {} \\; | sort -nr | head -n 20',
+     'Get-ChildItem -LiteralPath . -Recurse -File | Sort-Object Length -Descending | Select-Object -First 20 FullName, Length', 'shows the largest files under this directory', 'find'),
+    ('(?:show |list )?(?:python version)', 'python3 --version', 'python --version', 'shows the Python version', 'python3'),
+    ('(?:show |list )?(?:git version)', 'git --version', 'git --version', 'shows the Git version', 'git'),
+    ('(?:show |list )?(?:git status|repository status)', 'git status --short --branch', 'git status --short --branch', 'shows branch and changed files', 'git'),
+    ('(?:show |list )?(?:git changes|git diff)', 'git diff --stat', 'git diff --stat', 'summarizes unstaged changes in this repository', 'git'),
+    ('(?:show |list )?(?:git branches)', 'git branch --all', 'git branch --all', 'lists Git branches', 'git'),
+    ('(?:show |list )?(?:git log|recent commits)', 'git log -n 10 --oneline', 'git log -n 10 --oneline', 'shows the ten latest commits', 'git'),
+    ('(?:show |list )?(?:git remotes)', 'git remote -v', 'git remote -v', 'shows configured Git remotes; URLs may include credentials', 'git'),
+    ('(?:show |list )?(?:docker containers|containers)', 'docker ps', 'docker ps', 'lists running Docker containers; requires a Docker daemon', 'docker'),
+    ('(?:show |list )?(?:all docker containers)', 'docker ps -a', 'docker ps -a', 'lists all Docker containers', 'docker'),
+    ('(?:show |list )?(?:docker images)', 'docker images', 'docker images', 'lists locally stored Docker images', 'docker'),
+    ('(?:show |list )?(?:docker disk usage)', 'docker system df', 'docker system df', 'shows Docker disk usage without deleting anything', 'docker'),
+    ('(?:show |list )?(?:flatpak apps|flatpak applications)', 'flatpak list --app', None, 'lists installed Flatpak applications', 'flatpak'),
+    ('(?:show |list )?(?:flatpak remotes)', 'flatpak remotes', None, 'lists configured Flatpak repositories', 'flatpak'),
+    ('(?:show |list )?(?:snap apps|snap packages)', 'snap list', None, 'lists installed Snap packages', 'snap'),
+    ('(?:show |list )?(?:wsl distros|wsl distributions)', None, 'wsl --list --verbose', 'lists installed WSL distributions', None),
+    ('(?:show |list )?(?:power plans)', None, 'powercfg /list', 'lists Windows power plans', None),
+    ('(?:show |list )?(?:windows version)', None, 'Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber', 'shows Windows edition and build', None),
+    ('(?:show |list )?(?:installed windows updates)', None, 'Get-HotFix', 'lists installed Windows hotfixes (not every update type)', None),
+    ('(?:show |list )?(?:windows features)', None, 'Get-WindowsOptionalFeature -Online', 'lists optional Windows features; may require elevation', None),
+    ('(?:show |list )?(?:computer serial number)', 'cat /sys/class/dmi/id/product_serial',
+     'Get-CimInstance Win32_BIOS | Select-Object SerialNumber', 'shows firmware serial number; Linux may require privileges', 'cat'),
+]
+
+
+def _expanded_offline(raw, t, pkg):
+    # Package diagnostics are independent of app aliases.
+    name = pkg['name']
+    lists = {
+        'pacman': ('pacman -Q', 'pacman -Qu'), 'paru': ('paru -Q', 'paru -Qu'),
+        'yay': ('yay -Q', 'yay -Qu'), 'apt': ('apt list --installed', 'apt list --upgradable'),
+        'dnf': ('dnf list --installed', 'dnf list --upgrades'),
+        'dnf5': ('dnf5 list --installed', 'dnf5 list --upgrades'),
+        'zypper': ('zypper search --installed-only', 'zypper list-updates'),
+        'apk': ('apk info', "apk version -l '<'"),
+        'xbps': ('xbps-query -l', 'xbps-install -un'),
+        'emerge': ('qlist -I', 'emerge --pretend --update --deep --newuse @world'),
+        'winget': ('winget list', 'winget list --upgrade-available'),
+        'choco': ('choco list', 'choco outdated'), 'scoop': ('scoop list', 'scoop status'),
+    }
+    if name in lists:
+        if re.fullmatch(r'(?:show|list)(?: my| all)? installed (?:apps|packages|programs)', t):
+            cmd = lists[name][0]
+            return (_tool_command('qlist', cmd) if name == 'emerge' else cmd, 'lists installed packages', 0)
+        if re.fullmatch(r'(?:show|list|check)(?: for)?(?: available)? (?:updates|outdated packages|upgradable packages)', t):
+            cmd = lists[name][1]
+            if name == 'apk': cmd = 'apk version -l ' + _quote('<')
+            return (cmd, 'lists available package updates using existing repository metadata', 0)
+
+    for pattern, linux, win, explain, tool in OFFLINE_INFO:
+        if not re.fullmatch(pattern, t):
+            continue
+        if IS_WIN:
+            if win and tool in ('git', 'docker', 'python3'):
+                win = _tool_command('python' if tool == 'python3' else tool, win)
+            return (win, explain, 0) if win else None
+        cmd = linux
+        if pkg['family'] == 'alpine' and tool == 'ps':
+            cmd, explain = 'ps', 'lists processes (minimal BusyBox ps does not rank CPU usage)'
+        if t.endswith('services'):
+            if shutil.which('systemctl'):
+                cmd = 'systemctl --failed --no-pager' if 'failed' in t else 'systemctl list-units --type=service --no-pager'
+            elif shutil.which('rc-status'):
+                cmd = 'rc-status --all'
+            elif shutil.which('sv'):
+                cmd = 'sv status /var/service/*'
+        elif 'logs' in t or 'errors' in t:
+            if shutil.which('journalctl'):
+                cmd = 'journalctl -b --no-pager -n 100' if 'boot' in t else 'journalctl -p err --no-pager -n 20'
+        elif 'firewall' in t:
+            for exe, command in [('ufw', 'sudo ufw status'), ('firewall-cmd', 'firewall-cmd --list-all'), ('nft', 'sudo nft list ruleset')]:
+                if shutil.which(exe):
+                    return (command, explain + ' (may require administrator privileges)', 0)
+        if not cmd:
+            return ('echo ' + _quote('No supported tool for this wish was detected on this machine.'), explain, 0)
+        return (_tool_command(tool, cmd) if tool else cmd, explain, 0)
+
+    # Match the original case-preserving request, not the normalized text.
+    m = re.fullmatch(r'(?:create|make)(?: a| the)? (?:folder|directory) (.+)', raw, re.I)
+    if m:
+        path = _quote_path(m[1])
+        cmd = f'New-Item -ItemType Directory -Path {path}' if IS_WIN else f'mkdir -p {path}'
+        return (cmd, 'creates a directory; existing Linux directories are kept', 1)
+    m = re.fullmatch(r'(?:read|show|view)(?: the)? file (.+)', raw, re.I)
+    if m:
+        path = _quote_path(m[1])
+        return (f'Get-Content -LiteralPath {path}' if IS_WIN else f'cat {path}', 'shows the file contents', 0)
+    m = re.fullmatch(r'(?:file info|file information|file details|permissions for)(?: the)? (.+)', raw, re.I)
+    if m:
+        path = _quote_path(m[1])
+        return (f'Get-Item -LiteralPath {path} | Format-List *' if IS_WIN else f'ls -ld {path}', 'shows file information and attributes', 0)
+    m = re.fullmatch(r'(?:hash|checksum|sha256)(?: the)?(?: file)? (.+)', raw, re.I)
+    if m:
+        path = _quote_path(m[1])
+        cmd = f'Get-FileHash -Algorithm SHA256 -LiteralPath {path}' if IS_WIN else _tool_command('sha256sum', f'sha256sum {path}')
+        return (cmd, 'computes a SHA-256 fingerprint of the file', 0)
+    m = re.fullmatch(r'(?:find|search for)(?: a| the)? (?:file|files) (.+)', raw, re.I)
+    if m:
+        pattern = _quote(_unquote(m[1]))
+        cmd = f'Get-ChildItem -LiteralPath . -Recurse -File -Filter {pattern}' if IS_WIN else f'find . -type f -name {pattern}'
+        return (cmd, 'finds matching filenames below the current directory; supports * wildcards', 0)
+    m = re.fullmatch(r'(?:size of|folder size)(?: the)?(?: folder| directory| file)? (.+)', raw, re.I)
+    if m:
+        path = _quote_path(m[1])
+        cmd = (f'Get-ChildItem -LiteralPath {path} -Recurse -File | Measure-Object -Property Length -Sum'
+               if IS_WIN else f'du -sh {path}')
+        return (cmd, 'totals folder/file size (Windows reports bytes)', 0)
+    m = re.fullmatch(r'(?:ping|test connection to|resolve|dns lookup|lookup dns for) ([a-z0-9][a-z0-9.:-]*)', raw, re.I)
+    if m:
+        host = _quote(m[1])
+        lookup = t.startswith(('resolve', 'dns', 'lookup'))
+        if IS_WIN:
+            cmd = f'Resolve-DnsName -Name {host}' if lookup else f'Test-Connection -ComputerName {host} -Count 4'
+        else:
+            tool = 'nslookup' if lookup else 'ping'
+            cmd = _tool_command(tool, f'nslookup {host}' if lookup else f'ping -c 4 {host}')
+        return (cmd, 'looks up DNS records' if lookup else 'sends four probes; requires connectivity to the target', 0)
+    m = re.fullmatch(r'(status of|start|stop|restart|enable|disable)(?: the)? service ([a-z0-9][a-z0-9_.@-]*)', raw, re.I)
+    if m:
+        action, service = m[1].lower(), _quote(m[2])
+        level = 0 if action == 'status of' else 1
+        if IS_WIN:
+            verbs = {'status of': 'Get', 'start': 'Start', 'stop': 'Stop', 'restart': 'Restart'}
+            if action in verbs: cmd = f'{verbs[action]}-Service -Name {service}'
+            else: cmd = f'Set-Service -Name {service} -StartupType ' + ('Automatic' if action == 'enable' else 'Disabled')
+        elif shutil.which('systemctl'):
+            cmd = ('systemctl status --no-pager ' if not level else f'sudo systemctl {action} ') + service
+        elif shutil.which('rc-service') and action in ('status of', 'start', 'stop', 'restart'):
+            cmd = f"{'sudo ' if level else ''}rc-service {service} {'status' if not level else action}"
+        elif shutil.which('sv') and action in ('status of', 'start', 'stop', 'restart'):
+            verb = {'status of': 'status', 'start': 'up', 'stop': 'down', 'restart': 'restart'}[action]
+            cmd = f"{'sudo ' if level else ''}sv {verb} /var/service/{m[2]}"
+        else:
+            return ('echo ' + _quote('No supported service manager for this action was detected.'), 'service action unavailable', 0)
+        return (cmd, f'{action} service {m[2]} (administrator privileges may be required)', level)
+    return None
+
+
 def offline_match(text, ai_available):
     """Return (cmd, explain, danger) or None. Covers the everyday stuff."""
     pkg = detect_pkg()
     t = _clean(text)
+    raw = _clean_preserving_case(text)
+    expanded = _expanded_offline(raw, t, pkg)
+    if expanded:
+        return expanded
 
     # easter egg (xkcd 149)
     if t in ("make me a sandwich", "sudo make me a sandwich"):
@@ -579,25 +836,25 @@ def offline_match(text, ai_available):
         return (f"echo '{word}'", "an old Linux joke — look up xkcd 149", 0)
 
     # trash a file/folder (checked before package removal on purpose)
-    m = re.match(r"^(?:delete|remove|trash)(?: the)? (?:file|folder|directory) (.+)$", t)
+    m = re.match(r"^(?:delete|remove|trash)(?: the)? (?:file|folder|directory) (.+)$", raw, re.I)
     if m:
-        target = m.group(1).strip().strip("'\"")
+        target = _path(m.group(1))
         if IS_WIN:
             return (_recycle_cmd(target),
                     f"moves '{target}' to the Recycle Bin — you can restore it from there", 1)
-        return (f"gio trash '{target}'",
+        return (_tool_command("gio", "gio trash -- " + _quote_path(target)),
                 f"moves '{target}' to the Trash — you can restore it from Dolphin", 1)
 
     # install
     m = re.match(r"^(?:install|get|download)(?: the)? (.+)$", t)
     if m and pkg["name"]:
         app = _app_name(m.group(1))
-        p = alias_pkg(app, pkg["family"])
+        p = _manager_alias(app, pkg)
         if p:
             return (pkg["install"].format(pkg=p),
                     f"installs {app} using {pkg['name']} (the package manager)", 1)
         if not ai_available:
-            return (pkg["search"].format(term=app),
+            return (_package_search(pkg, app),
                     f"searches the repositories for '{app}' so you can pick the exact package", 0)
         return None  # let the AI resolve the real package name
 
@@ -605,10 +862,10 @@ def offline_match(text, ai_available):
     m = re.match(r"^(?:uninstall|remove)(?: the)? (.+)$", t)
     if m and pkg["name"]:
         app = _app_name(m.group(1))
-        p = alias_pkg(app, pkg["family"])
+        p = _manager_alias(app, pkg)
         if p:
             return (pkg["remove"].format(pkg=p.split()[0]),
-                    f"removes {app} and its unneeded leftovers", 1)
+                    f"removes {app} using {pkg['name']}", 1)
         return None
 
     # update the system
@@ -619,7 +876,7 @@ def offline_match(text, ai_available):
 
     if re.search(r"^(?:search|look)(?: for)? (?:a |an )?(?:package|app) (.+)$", t) and pkg["name"]:
         term = re.search(r"(?:package|app) (.+)$", t).group(1)
-        return (pkg["search"].format(term=term), f"searches the repositories for '{term}'", 0)
+        return (_package_search(pkg, term), f"searches the repositories for '{term}'", 0)
 
     # everyday questions
     if IS_WIN:
@@ -648,10 +905,10 @@ def _everyday_win(t):
                 "@{n='free RAM (GB)';e={[math]::Round($_.FreePhysicalMemory/1MB,1)}},"
                 "@{n='total RAM (GB)';e={[math]::Round($_.TotalVisibleMemorySize/1MB,1)}}",
                 "shows how much RAM is used and how much is free", 0)
-    if re.search(r"(what('| i)?s )?(my )?(local )?ip( address)?$", t):
+    if re.fullmatch(r"(what('| i)?s )?(my )?(local )?ip( address)?", t):
         return ("ipconfig", "shows your network adapters and their IP addresses", 0)
     if re.search(r"public ip", t):
-        return ("curl.exe -s ifconfig.me", "asks the internet what your public IP is", 0)
+        return ("curl.exe -fsS https://api.ipify.org", "asks the internet what your public IP is", 0)
     if re.search(r"(show|list|scan)( me)?( the| all| available| nearby)? ?wi-?fi( networks)?", t):
         return ("netsh wlan show networks", "lists the Wi-Fi networks around you", 0)
     if re.search(r"(show|list)( me)?( the)?( running)? processes", t):
@@ -679,19 +936,19 @@ def _everyday_linux(t, pkg):
     if re.search(r"(disk|storage)( space| usage)?$|how much (disk|storage|space)", t):
         return ("df -h", "shows how full each disk is, in human-readable sizes", 0)
     if re.search(r"what('| i)?s (taking|using|eating)( up)? (my )?(space|storage|disk)", t):
-        return ("du -h --max-depth=1 ~ | sort -hr | head -n 12",
-                "shows which folders in your home use the most space, biggest first", 0)
+        return ("du -h -d 1 ~",
+                "shows space used by folders in your home", 0)
     if re.search(r"(memory|ram)( usage)?$|how much (memory|ram)", t):
         return ("free -h", "shows how much RAM is used and how much is free", 0)
-    if re.search(r"(what('| i)?s )?(my )?(local )?ip( address)?$", t):
+    if re.fullmatch(r"(what('| i)?s )?(my )?(local )?ip( address)?", t):
         return ("ip -brief address", "shows your network devices and their IP addresses", 0)
     if re.search(r"public ip", t):
-        return ("curl -s ifconfig.me && echo", "asks the internet what your public IP is", 0)
+        return (_tool_command("curl", "curl -fsS https://api.ipify.org && echo"), "asks the internet what your public IP is", 0)
     if re.search(r"(show|list|scan)( me)?( the| all| available| nearby)? ?wi-?fi( networks)?", t):
         return ("nmcli device wifi list", "lists the Wi-Fi networks around you", 0)
     if re.search(r"(show|list)( me)?( the)?( running)? processes", t):
-        return ("ps aux --sort=-%mem | head -n 15",
-                "shows the 15 programs using the most memory right now", 0)
+        return ("ps" if pkg["family"] == "alpine" else "ps aux --sort=-%mem | head -n 15",
+                "lists processes (ranked by memory when procps is available)", 0)
     if re.search(r"battery( level| status| percentage)?$", t):
         return ("cat /sys/class/power_supply/BAT*/capacity",
                 "shows your battery percentage", 0)
@@ -746,12 +1003,12 @@ LEVEL1 = [
     r"^\s*sudo\b",
     r"\b(pacman|paru|yay)\b.*\s-(S|R|Syu)",
     r"\bapt(-get)?\s+(install|remove|purge|upgrade|full-upgrade|dist-upgrade|autoremove)\b",
-    r"\bdnf\s+(install|remove|upgrade|update|autoremove|swap)\b",
+    r"\bdnf5?\s+(install|remove|upgrade|update|autoremove|swap)\b",
     r"\bzypper\s+(install|in|remove|rm|update|up|dup)\b",
     r"\bapk\s+(add|del|upgrade)\b",
     r"\bxbps-(install|remove)\b",
     r"\bemerge\b(?!.*--search)",
-    r"\bsystemctl\b",
+    r"\bsystemctl\s+(start|stop|restart|reload|enable|disable|mask|unmask|reboot|poweroff|suspend|hibernate)\b",
     r"\b(kill|pkill|killall)\b",
     r"\bnpm\s+i(nstall)?\s+-g",
     r"\bpip\d?\s+install",
@@ -788,6 +1045,8 @@ WIN_LEVEL1 = [
     r"(?i)\bnetsh\b(?!\s+wlan\s+show)",
     r"(?i)\breg\s+add\b",
     r"(?i)\bset-itemproperty\b",
+    r"(?i)\b(start|restart|set)-service\b",
+    r"(?i)\bnew-item\b",
     r"(?i)\bstop-(process|service|computer)\b",
     r"(?i)\brestart-computer\b",
     r"(?i)\bschtasks\b",
@@ -921,7 +1180,7 @@ def present(request, cmd, explain, danger, dry=False):
     if IS_WIN:
         code = subprocess.call(["powershell", "-NoProfile", "-Command", cmd])
     else:
-        code = subprocess.call(cmd, shell=True, executable="/bin/bash")
+        code = subprocess.call(cmd, shell=True, executable="/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh")
     print(DIM("  " + "─" * 48))
     if code == 0:
         print(GREEN(f"  ✓ done  {DIM('— now you know:')} {cmd}\n"))
@@ -1199,6 +1458,33 @@ def banner():
 """
 
 
+def show_offline_wishes():
+    print(banner())
+    print("  Offline wishes — no AI key needed to translate these requests.\n")
+    print("  Package changes and network probes still need network access;")
+    print("  optional tools, permissions, and services depend on your machine.\n")
+    examples = [
+        "list installed packages", "check for updates", "install vlc", "search for package editor",
+        "update my system", "show cpu info", "uptime", "computer name", "kernel version",
+        "os version", "show disks", "show usb devices", "show graphics card", "who am i",
+        "show groups", "logged in users", "show network interfaces", "routing table",
+        "dns servers", "listening ports", "network connections", "arp table", "show hidden files",
+        "show services", "failed services", "boot logs", "system errors", "scheduled tasks",
+        "firewall status", "wifi status", "saved wifi networks", "time zone", "cpu usage",
+        "swap usage", "mounts", "folder sizes", "largest files", "python version", "git version",
+        "git status", "git diff", "git branches", "recent commits", "git remotes",
+        "docker containers", "all docker containers", "docker images", "docker disk usage",
+        "create folder Project Notes", "read file README.md", "file info README.md",
+        "sha256 file README.md", "find files *.py", "size of Project Notes",
+        "ping example.com", "resolve example.com", "status of service sshd",
+        "start service sshd", "stop service sshd", "restart service sshd",
+        "enable service sshd", "disable service sshd", "how much disk space do i have",
+    ]
+    print("\n".join("    " + example for example in examples))
+    print("\n  Linux extras: flatpak apps, flatpak remotes, snap packages")
+    print("  Windows extras: wsl distros, power plans, windows version, installed windows updates, windows features\n")
+
+
 def show_help():
     print(banner())
     print(f"""  {BOLD('usage')}
@@ -1219,6 +1505,7 @@ def show_help():
     genie setup      connect an AI provider (free options available)
                      run it again to add more — genie falls back
                      automatically when one is busy
+    genie wishes     browse built-in offline wishes
     genie status     test all your providers right now
     genie history    the commands you've learned so far
     genie -n <wish>  dry run — show the command but never run it
@@ -1239,6 +1526,8 @@ def main():
         print(f"genie {VERSION}")
     elif args[0] == "setup":
         setup()
+    elif args[0] in ("wishes", "offline"):
+        show_offline_wishes()
     elif args[0] in ("status", "doctor"):
         show_status()
     elif args[0] == "history":

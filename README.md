@@ -47,6 +47,8 @@ Free tiers are flaky, so genie doesn't trust just one. Set up more than one prov
 
 Common jobs work with no AI at all. Installing apps, updating the system, and checking disk, RAM, Wi-Fi, or battery are built in, so they work offline with no key.
 
+Run `genie wishes` to browse the expanded offline catalogue: file searches and hashes, package diagnostics, hardware, networking, services, Git, Docker, and Windows tools. See [offline wishes and command references](docs/offline-wishes.md) for examples and platform requirements.
+
 It's one Python file with no dependencies. Nothing to `pip install`.
 
 ## Works on
@@ -126,6 +128,7 @@ Your keys are stored in `~/.config/genie/config.json` (chmod 600).
 /genie <anything in English>   make a wish
 genie setup                    connect an AI provider (run again to add more)
 genie status                   live-test every provider you've configured
+genie wishes                   browse built-in offline wishes
 genie history                  everything you've asked for so far
 genie -n <wish>                dry run — show the command, never run it
 genie help                     help screen
